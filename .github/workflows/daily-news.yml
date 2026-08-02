@@ -1,0 +1,89 @@
+name: Daily AI News Digest
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # 매일 UTC 00:00 = 한국 오전 9시
+  workflow_dispatch:      # Actions 탭에서 수동 실행도 가능
+
+jobs:
+  news-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install feedparser
+
+      - name: Generate and send news digest
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          AI_RESPONSE_LANGUAGE: ${{ secrets.AI_RESPONSE_LANGUAGE }}
+        run: python - <<'EOF'
+import os, smtplib, json, urllib.request, feedparser
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# ===== 1. RSS에서 뉴스 가져오기 =====
+SOURCES = [
+    "https://hnrss.org/frontpage",
+    "https://feeds.arstechnica.com/arstechnica/technology-lab",
+    "https://www.theverge.com/rss/index.xml",
+    "https://techcrunch.com/feed/",
+]
+items = []
+for url in SOURCES:
+    try:
+        feed = feedparser.parse(url)
+        for entry in feed.entries[:5]:
+            items.append(f"- {entry.get('title','')}: {entry.get('link','')}")
+    except Exception as e:
+        print(f"RSS 실패: {url} - {e}")
+
+news_text = "\n".join(items[:15]) if items else "뉴스를 가져오지 못했습니다."
+
+# ===== 2. DeepSeek로 요약 =====
+lang = os.environ.get("AI_RESPONSE_LANGUAGE", "en")
+prompt = f"""다음 뉴스들을 {lang}로 요약해서 HTML 형식으로 만들어줘.
+핵심 5가지를 짧고 명확하게 정리하고, 각 항목에 제목과 링크를 남겨줘.
+뉴스:
+{news_text}"""
+
+data = json.dumps({
+    "model": "deepseek-chat",
+    "messages": [{"role": "user", "content": prompt}]
+}).encode()
+
+req = urllib.request.Request(
+    "https://api.deepseek.com/chat/completions",
+    data=data,
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ['DEEPSEEK_API_KEY']}"
+    }
+)
+try:
+    with urllib.request.urlopen(req) as resp:
+        result = json.loads(resp.read().decode())
+    summary_html = result["choices"][0]["message"]["content"]
+except Exception as e:
+    summary_html = f"<p>요약 실패: {e}</p><pre>{news_text}</pre>"
+
+# ===== 3. Gmail로 전송 =====
+msg = MIMEMultipart()
+msg["From"] = os.environ["GMAIL_ADDRESS"]
+msg["To"] = os.environ["EMAIL_TO"]
+msg["Subject"] = "📰 Daily AI News Digest"
+msg.attach(MIMEText(summary_html, "html"))
+
+with smtplib.SMTP("smtp.gmail.com", 587) as server:
+    server.starttls()
+    server.login(os.environ["GMAIL_ADDRESS"], os.environ["GMAIL_APP_PASSWORD"])
+    server.send_message(msg)
+
+print("✅ 이메일 전송 완료!")
+EOF
