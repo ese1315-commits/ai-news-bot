@@ -1,0 +1,90 @@
+name: Hot Deal Debug
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Debug hotdeal parsing
+        run: |
+          cat <<'PYEOF' > /tmp/debug.py
+          import urllib.request, re
+          from html import unescape
+
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+              "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+              "Referer": "https://www.ppomppu.co.kr/",
+          }
+
+          def fetch(url):
+              try:
+                  req = urllib.request.Request(url, headers=HEADERS)
+                  with urllib.request.urlopen(req, timeout=20) as resp:
+                      return resp.read().decode("utf-8", "ignore")
+              except Exception as e:
+                  print(f"❌ {url} 실패: {e}")
+                  return ""
+
+          # ===== 뽐뿌 =====
+          print("=" * 60)
+          print("🔍 뽐뿌")
+          html = fetch("https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu")
+          print(f"  페이지 크기: {len(html)} bytes")
+          if html:
+              # 다양한 패턴 시도
+              print("  --- 패턴1: view.php 링크 ---")
+              p1 = re.findall(r'href="(/zboard/view\.php[^"]*)"', html)
+              print(f"  view.php 링크 {len(p1)}개")
+              for x in p1[:3]:
+                  print(f"    {x}")
+              print("  --- 패턴2: list_title 클래스 ---")
+              p2 = re.findall(r'class="list_title"[^>]*>([^<]+)</a>', html)
+              print(f"  list_title {len(p2)}개")
+              for x in p2[:3]:
+                  print(f"    {unescape(x.strip())[:50]}")
+              print("  --- 패턴3: 일반 게시글 링크 ---")
+              p3 = re.findall(r'href="([^"]*view\.php[^"]*)"[^>]*>\s*([^<]{5,80})', html)
+              print(f"  view.php+제목 {len(p3)}개")
+              for l, t in p3[:3]:
+                  print(f"    [{unescape(t.strip())[:40]}] → {l}")
+
+          # ===== 어미새 =====
+          print("=" * 60)
+          print("🔍 어미새")
+          html = fetch("https://eomisae.co.kr")
+          print(f"  페이지 크기: {len(html)} bytes")
+          if html:
+              print("  --- 패턴1: a태그 링크들 (상위 5개) ---")
+              p1 = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>([^<]{8,60})</a>', html)
+              print(f"  총 {len(p1)}개")
+              for l, t in p1[:5]:
+                  print(f"    [{unescape(t.strip())[:40]}] → {l[:60]}")
+              print("  --- 게시글/딜 관련 링크 ---")
+              p2 = re.findall(r'href="(/[^"]*)"[^>]*>([^<]{8,60})</a>', html)
+              for l, t in p2[:10]:
+                  tt = unescape(t.strip())
+                  if any(k in tt.lower() for k in ['딜', '특가', '할인', '무료', '세일', '가격']):
+                      print(f"    💰 [{tt[:40]}] → {l[:60]}")
+
+          # ===== 알구몬 =====
+          print("=" * 60)
+          print("🔍 알구몬")
+          html = fetch("https://www.algumon.com/n/deal")
+          print(f"  페이지 크기: {len(html)} bytes")
+          if html:
+              print("  --- 첫 500자 미리보기 ---")
+              print(f"  {html[:500]}")
+              print("  --- a태그들 ---")
+              p1 = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>([^<]{8,60})</a>', html)
+              print(f"  총 {len(p1)}개")
+              for l, t in p1[:5]:
+                  print(f"    [{unescape(t.strip())[:40]}] → {l[:60]}")
+
+          print("=" * 60)
+          print("진단 완료!")
+          PYEOF
+          python /tmp/debug.py
