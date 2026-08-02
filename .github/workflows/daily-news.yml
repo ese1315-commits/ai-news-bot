@@ -24,25 +24,39 @@ jobs:
           from email.mime.multipart import MIMEMultipart
 
           SOURCES = [
-              "https://hnrss.org/frontpage",
-              "https://feeds.arstechnica.com/arstechnica/technology-lab",
-              "https://www.theverge.com/rss/index.xml",
-              "https://techcrunch.com/feed/",
+              # ── 종합 뉴스 ──
+              "https://www.yna.co.kr/rss/topnews.xml",
+              "https://www.hani.co.kr/rss/",
+              "https://news.kbs.co.kr/rss/rss5g.xml",
+              "https://www.chosun.com/rss/",
+              "https://www.joongang.co.kr/rss/",
+              "https://www.khan.co.kr/rss/",
+              # ── 경제 뉴스 ──
+              "https://www.mt.co.kr/rss/",
+              "https://www.fnnews.com/rss/",
+              "https://www.etnews.com/rss/",
+              # ── IT/테크 뉴스 ──
+              "https://zdnet.co.kr/rss/",
+              "https://it.donga.com/feed/",
+              "https://www.bloter.net/rss/",
+              # ── 방송 뉴스 ──
+              "https://imnews.imbc.com/rss/",
+              "https://www.ytn.co.kr/rss/",
           ]
           items = []
           for url in SOURCES:
               try:
                   feed = feedparser.parse(url)
-                  for entry in feed.entries[:5]:
+                  for entry in feed.entries[:3]:
                       items.append(f"- {entry.get('title','')}: {entry.get('link','')}")
               except Exception as e:
                   print(f"RSS 실패: {url} - {e}")
 
-          news_text = "\n".join(items[:15]) if items else "뉴스를 가져오지 못했습니다."
+          news_text = "\n".join(items[:20]) if items else "뉴스를 가져오지 못했습니다."
 
-          lang = os.environ.get("AI_RESPONSE_LANGUAGE", "en")
-          prompt = f"""다음 뉴스들을 {lang}로 요약해서 HTML 형식으로 만들어줘.
-          핵심 5가지를 짧고 명확하게 정리하고, 각 항목에 제목과 링크를 남겨줘.
+          lang = os.environ.get("AI_RESPONSE_LANGUAGE", "ko")
+          prompt = f"""다음 한국 뉴스들을 {lang}로 요약해서 HTML 형식으로 만들어줘.
+          핵심 10가지를 짧고 명확하게 정리하고, 각 항목에 제목과 링크를 남겨줘.
           뉴스:
           {news_text}"""
 
@@ -69,7 +83,7 @@ jobs:
           msg = MIMEMultipart()
           msg["From"] = os.environ["GMAIL_ADDRESS"]
           msg["To"] = os.environ["EMAIL_TO"]
-          msg["Subject"] = "📰 Daily AI News Digest"
+          msg["Subject"] = "📰 오늘의 국내 뉴스 요약"
           msg.attach(MIMEText(summary_html, "html"))
 
           with smtplib.SMTP("smtp.gmail.com", 587) as server:
