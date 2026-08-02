@@ -52,20 +52,42 @@ jobs:
               - "https://news.kbs.co.kr/rss/rss5g.xml"
               - "https://www.chosun.com/rss/"
               - "https://www.joongang.co.kr/rss/"
+              - "https://www.donga.com/_contents/rss"
+              - "https://www.seoul.co.kr/rss/"
+              - "https://www.pressian.com/rss/allArticle.xml"
+              - "https://www.ohmynews.com/rss/allArticle.xml"
+              # ── 경제/증권 ──
               - "https://www.mt.co.kr/rss/"
               - "https://www.fnnews.com/rss/"
-              # ── AI/테크 전문 언론사 (AI 뉴스 확보용!) ──
+              - "https://www.hankyung.com/rss/"
+              - "https://www.mk.co.kr/rss/"
+              - "https://www.asiae.co.kr/rss/"
+              - "https://www.sedaily.com/RSS/RssFeed.aspx"
+              - "https://www.etoday.co.kr/rss/"
+              # ── AI/테크 전문 언론사 (AI 뉴스 확보!) ──
               - "https://zdnet.co.kr/rss/"
               - "https://it.donga.com/feed/"
               - "https://www.etnews.com/rss/"
               - "https://www.bloter.net/rss/"
-              # ── 스포츠/연예/생활 ──
+              - "https://www.aitimes.kr/rss/"
+              - "https://www.hellodd.com/rss/"
+              - "https://www.boannews.com/rss/"
+              - "https://www.cio.co.kr/rss/"
+              - "https://platum.kr/rss/"
+              # ── 스포츠 ──
+              - "https://www.sportalkorea.com/rss/"
               - "https://www.spotvnews.co.kr/rss/allArticle.xml"
               - "https://www.sportsworldi.com/rss/allArticle.xml"
-              - "https://entertain.naver.com/rss/newsList.xml"
+              # ── 연예 ──
+              - "https://www.osen.co.kr/rss/allArticle.xml"
+              # ── 국제 ──
+              - "https://www.voakorea.com/rss"
+              # ── 과학/건강 ──
+              - "https://www.dongascience.com/rss/"
+              - "https://www.kormedi.com/rss/"
             prompt_template: |
               아래 한국 뉴스 후보에서 AI/테크, 정치/사회, 경제, 국제, 스포츠, 연예, 생활/문화, 과학/건강 8개 분야 각각에서
-              가장 중요하고 화제성 있는 뉴스를 5개씩 반드시 선별해줘. 각 섹션은 반드시 5개씩 채워야 해.
+              가장 중요하고 화제성 있는 뉴스를 7개씩 반드시 선별해줘. 각 섹션은 반드시 7개씩 채워야 해.
           CFG
 
           # ---- requirements.txt ----
@@ -99,17 +121,17 @@ jobs:
               for url in sources:
                   rss_items += get_rss(url, 15)
 
-              # 중복 제거 (최대 150개 유지)
+              # 중복 제거 (최대 200개 유지)
               seen, uniq = set(), []
               for item in rss_items:
                   title = item.split(":")[0] if ":" in item else item
                   if title not in seen:
                       seen.add(title)
                       uniq.append(item)
-              return "--- [한국 뉴스 종합] ---\n" + "\n".join(uniq[:150])
+              return "--- [한국 뉴스 종합] ---\n" + "\n".join(uniq[:200])
           PY
 
-          # ---- content_processor.py ----
+          # ---- content_processor.py (중요도 점수 버전) ----
           cat <<'PY' > content_processor.py
           import json, os, urllib.request
 
@@ -135,20 +157,23 @@ jobs:
               prompt = f"""{prompt_template}
 
           AI/테크 섹션에는 반드시 AI 관련 뉴스(인공지능, LLM, 생성형 AI, AI 반도체, AI 규제 등)를 넣어줘.
-          각 섹션은 반드시 5개씩 채워줘. 뉴스가 부족하면 비슷한 분야의 뉴스를 채워서라도 5개를 맞춰줘.
+          각 섹션은 반드시 7개씩 채워줘. 뉴스가 부족하면 비슷한 분야의 뉴스를 채워서라도 7개를 맞춰줘.
           가십, 광고성 기사, 지엽적인 뉴스는 제외.
+
+          중요! 각 뉴스에 중요도 점수를 1~100 사이로 매기고, 점수가 높은 순으로 정렬해서 출력해줘.
+          중요도 점수 기준: 보도 가치, 사회적/경제적 파급력, 화제성, 시급성.
 
           반드시 아래 JSON 형식으로만 출력해. 설명, 마크다운, 코드 블록은 절대 넣지 마.
 
           {{
-            "AI/테크": [{{"title": "제목", "link": "https://..."}}],
-            "정치/사회": [{{"title": "제목", "link": "https://..."}}],
-            "경제": [{{"title": "제목", "link": "https://..."}}],
-            "국제": [{{"title": "제목", "link": "https://..."}}],
-            "스포츠": [{{"title": "제목", "link": "https://..."}}],
-            "연예": [{{"title": "제목", "link": "https://..."}}],
-            "생활/문화": [{{"title": "제목", "link": "https://..."}}],
-            "과학/건강": [{{"title": "제목", "link": "https://..."}}]
+            "AI/테크": [{{"title": "제목", "link": "https://...", "score": 95}}],
+            "정치/사회": [{{"title": "제목", "link": "https://...", "score": 95}}],
+            "경제": [{{"title": "제목", "link": "https://...", "score": 95}}],
+            "국제": [{{"title": "제목", "link": "https://...", "score": 95}}],
+            "스포츠": [{{"title": "제목", "link": "https://...", "score": 95}}],
+            "연예": [{{"title": "제목", "link": "https://...", "score": 95}}],
+            "생활/문화": [{{"title": "제목", "link": "https://...", "score": 95}}],
+            "과학/건강": [{{"title": "제목", "link": "https://...", "score": 95}}]
           }}
 
           뉴스 목록:
@@ -157,13 +182,18 @@ jobs:
               try:
                   start = raw.find("{")
                   end = raw.rfind("}") + 1
-                  return json.loads(raw[start:end])
+                  data = json.loads(raw[start:end])
+                  # 점수순 정렬 (score 내림차순)
+                  for cat in data:
+                      if isinstance(data[cat], list):
+                          data[cat].sort(key=lambda x: x.get("score", 0), reverse=True)
+                  return data
               except Exception as e:
                   print(f"JSON 파싱 실패: {e}")
                   return {"원문": raw}
           PY
 
-          # ---- report_generator.py ----
+          # ---- report_generator.py (점수 표시 버전) ----
           cat <<'PY' > report_generator.py
           from datetime import datetime
 
@@ -178,6 +208,19 @@ jobs:
               "과학/건강":   {"color": "#14B8A6", "emoji": "🔬"},
           }
 
+          def score_badge(score):
+              if score >= 90:
+                  bg = "#DC2626"; label = "🔥 최상"
+              elif score >= 80:
+                  bg = "#F59E0B"; label = "⭐ 중요"
+              elif score >= 70:
+                  bg = "#10B981"; label = "✅ 관심"
+              else:
+                  bg = "#9CA3AF"; label = "참고"
+              return (f'<span style="flex-shrink:0;background:{bg};color:#fff;font-size:10px;'
+                      f'font-weight:bold;border-radius:10px;padding:2px 8px;margin-left:8px;">'
+                      f'{label} {score}</span>')
+
           def generate_html(data):
               today = datetime.now().strftime("%Y년 %m월 %d일")
               weekday = ["월", "화", "수", "목", "금", "토", "일"][datetime.now().weekday()]
@@ -191,16 +234,19 @@ jobs:
                   count = len(items)
 
                   rows = ""
-                  for i, item in enumerate(items[:5], 1):
+                  for i, item in enumerate(items[:7], 1):
                       title = item.get("title", "제목 없음")
                       link = item.get("link", "#")
+                      score = item.get("score", 0)
+                      badge = score_badge(score)
                       rows += (
-                          f'<a href="{link}" style="display:flex;align-items:flex-start;'
+                          f'<a href="{link}" style="display:flex;align-items:center;'
                           f'text-decoration:none;padding:13px 18px;border-bottom:1px solid #f0f0f0;">'
                           f'<span style="flex-shrink:0;width:26px;height:26px;border-radius:50%;'
                           f'background:{color};color:#fff;font-weight:bold;font-size:13px;'
                           f'display:flex;align-items:center;justify-content:center;margin-right:12px;">{i}</span>'
-                          f'<span style="color:#1a1a2e;font-size:14px;line-height:1.6;">{title}</span></a>'
+                          f'<span style="color:#1a1a2e;font-size:14px;line-height:1.6;flex:1;">{title}</span>'
+                          f'{badge}</a>'
                       )
 
                   sections += (
@@ -271,7 +317,7 @@ jobs:
 
               print("📧 이메일 생성 및 전송 중...")
               html = report_generator.generate_html(summary)
-              notification_sender.send_email("📰 오늘의 핵심 뉴스 (8개 분야)", html)
+              notification_sender.send_email("📰 오늘의 핵심 뉴스 (중요도 순)", html)
 
               print("✅ 이메일 전송 완료!")
 
@@ -279,15 +325,4 @@ jobs:
               main()
           PY
 
-      # ===== 2. 의존성 설치 =====
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      # ===== 3. 실행 =====
-      - name: Run news digest
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python main.py
+      # ===== 2. 의존성 설치 =▌
