@@ -1,0 +1,235 @@
+name: Daily Market Briefing
+
+on:
+  schedule:
+    - cron: "0 23 * * *"   # 한국 오전 8시 (UTC 23시)
+  workflow_dispatch:
+
+jobs:
+  market-briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Generate and send market briefing
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          cat <<'PYEOF' > /tmp/market_brief.py
+          import os, json, smtplib, urllib.request, urllib.parse
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+          from datetime import datetime
+
+          HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+          # ===== 시세 가져오기 (Yahoo Finance) =====
+          def yahoo_price(symbol):
+              try:
+                  url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?range=5d&interval=1d"
+                  req = urllib.request.Request(url, headers=HEADERS)
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      data = json.loads(resp.read().decode())
+                  result = data["chart"]["result"][0]
+                  closes = result["indicators"]["quote"][0]["close"]
+                  closes = [c for c in closes if c is not None]
+                  if len(closes) < 2:
+                      return None
+                  last, prev = closes[-1], closes[-2]
+                  return last, (last - prev) / prev * 100
+              except Exception as e:
+                  print(f"Yahoo {symbol} 실패: {e}")
+                  return None
+
+          # ===== 코인 가져오기 (CoinGecko) =====
+          def coin_prices():
+              try:
+                  url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true"
+                  req = urllib.request.Request(url, headers=HEADERS)
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      return json.loads(resp.read().decode())
+              except Exception as e:
+                  print(f"CoinGecko 실패: {e}")
+                  return {}
+
+          # ===== DeepSeek 호출 =====
+          def call_deepseek(prompt):
+              data = json.dumps({
+                  "model": "deepseek-chat",
+                  "messages": [{"role": "user", "content": prompt}]
+              }).encode()
+              req = urllib.request.Request(
+                  "https://api.deepseek.com/chat/completions",
+                  data=data,
+                  headers={
+                      "Content-Type": "application/json",
+                      "Authorization": f"Bearer {os.environ['DEEPSEEK_API_KEY']}"
+                  }
+              )
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  result = json.loads(resp.read().decode())
+              return result["choices"][0]["message"]["content"]
+
+          # ===== 표시 도우미 =====
+          def trend(pct):
+              if pct is None:
+                  return '<span style="color:#9CA3AF;">-</span>'
+              arrow = "▲" if pct >= 0 else "▼"
+              color = "#E94560" if pct >= 0 else "#2563EB"
+              return f'<span style="color:{color};font-weight:bold;">{arrow}{abs(pct):.2f}%</span>'
+
+          def make_rows(entries, decimals=2, currency="$"):
+              html = ""
+              for name, data, curr in entries:
+                  if data:
+                      price, pct = data
+                      value = f"{curr}{price:,.{decimals}f}"
+                  else:
+                      pct, value = None, "-"
+                  change = trend(pct)
+                  html += (
+                      f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                      f'padding:12px 18px;border-bottom:1px solid #f6f6f6;">'
+                      f'<span style="font-size:13px;color:#555;">{name}</span>'
+                      f'<span style="font-size:13px;color:#1a1a2e;font-weight:bold;">{value} {change}</span></div>'
+                  )
+              return html
+
+          def card(title, rows_html):
+              return (
+                  f'<div style="background:#fff;border-radius:12px;margin-bottom:12px;overflow:hidden;'
+                  f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
+                  f'<div style="padding:12px 18px;border-bottom:1px solid #f0f0f0;">'
+                  f'<span style="font-size:13px;font-weight:bold;color:#1a1a2e;">{title}</span></div>'
+                  f'<div style="padding:4px 0;">{rows_html}</div></div>'
+              )
+
+          def half_card(title, name, value_line):
+              return (
+                  f'<div style="flex:1;background:#fff;border-radius:12px;overflow:hidden;'
+                  f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
+                  f'<div style="padding:12px 14px;border-bottom:1px solid #f0f0f0;">'
+                  f'<span style="font-size:12px;font-weight:bold;color:#1a1a2e;">{title}</span></div>'
+                  f'<div style="padding:12px 14px;">'
+                  f'<div style="font-size:12px;color:#555;">{name}</div>'
+                  f'<div style="font-size:14px;color:#1a1a2e;font-weight:bold;margin-top:4px;">{value_line}</div>'
+                  f'</div></div>'
+              )
+
+          # ===== 1. 데이터 수집 =====
+          print("📡 시세 수집 중...")
+          us = [
+              ("SCHD <span style='color:#aaa;font-size:11px;'>배당</span>", yahoo_price("SCHD"), "$"),
+              ("SCHG <span style='color:#aaa;font-size:11px;'>성장</span>", yahoo_price("SCHG"), "$"),
+          ]
+          fx = [
+              ("원/달러 환율", yahoo_price("KRW=X"), ""),
+              ("국제 금 <span style='color:#aaa;font-size:11px;'>온스</span>", yahoo_price("GC=F"), "$"),
+          ]
+          coins = coin_prices()
+
+          jp = yahoo_price("1629.T")
+          gold = yahoo_price("132030.KS")
+
+          # ===== 2. DeepSeek 전망 =====
+          print("🤖 DeepSeek 전망 생성 중...")
+          lines = []
+          for name, data, _ in us + fx:
+              if data:
+                  lines.append(f"{name}: {data[0]:,.2f} ({data[1]:+.2f}%)")
+          if jp:
+              lines.append(f"노무라 TOPIX17: {jp[0]:,.2f} ({jp[1]:+.2f}%)")
+          if gold:
+              lines.append(f"KODEX 골드선물: {gold[0]:,.2f} ({gold[1]:+.2f}%)")
+          for cid, cname in [("bitcoin", "비트코인"), ("ethereum", "이더리움")]:
+              if cid in coins:
+                  lines.append(f"{cname}: ${coins[cid]['usd']:,.2f} ({coins[cid].get('usd_24h_change', 0):+.2f}%)")
+
+          prompt = f"""오늘의 자산 시세 (한국 아침 8시 기준):
+          {'\n'.join(lines)}
+
+          위 시세를 바탕으로 3~5줄로 시장 전망을 한국어로 요약해줘.
+          개인 투자자가 알아두면 좋을 인사이트 중심으로, 각 문단을 <br>로 구분해서 써줘."""
+
+          try:
+              outlook = call_deepseek(prompt).replace("\n", "<br>")
+          except Exception as e:
+              outlook = f"전망 생성 실패: {e}"
+
+          # ===== 3. HTML 생성 =====
+          print("📧 이메일 생성 중...")
+          today = datetime.now().strftime("%Y.%m.%d")
+          weekday = ["월", "화", "수", "목", "금", "토", "일"][datetime.now().weekday()]
+
+          def fmt_coin(cid, cname):
+              if cid in coins:
+                  price = coins[cid]['usd']
+                  chg = coins[cid].get('usd_24h_change', 0)
+                  return (
+                      f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                      f'padding:12px 18px;border-bottom:1px solid #f6f6f6;">'
+                      f'<span style="font-size:13px;color:#555;">{cname} <span style="color:#aaa;font-size:11px;">{cid.upper()}</span></span>'
+                      f'<span style="font-size:13px;color:#1a1a2e;font-weight:bold;">${price:,.2f} {trend(chg)}</span></div>'
+                  )
+              return f'<div style="padding:12px 18px;color:#999;">{cname} 데이터 없음</div>'
+
+          coin_rows = fmt_coin("bitcoin", "비트코인") + fmt_coin("ethereum", "이더리움")
+
+          def val_line(data, curr, decimals=2):
+              if data:
+                  return f'{curr}{data[0]:,.{decimals}f} {trend(data[1])}'
+              return f'- {trend(None)}'
+
+          body = (
+              card("🇺🇸 미국 ETF", make_rows(us))
+              + '<div style="display:flex;gap:12px;margin-bottom:12px;">'
+              + half_card("🇯🇵 일본", "TOPIX17", val_line(jp, "¥"))
+              + half_card("🥇 한국 금", "KODEX 골드", val_line(gold, "", 0))
+              + '</div>'
+              + card("🪙 코인", coin_rows)
+              + card("💱 환율 · 국제 금", make_rows(fx))
+              + (
+                  f'<div style="background:#fff;border-radius:12px;margin-bottom:12px;overflow:hidden;'
+                  f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
+                  f'<div style="background:#7C3AED;padding:12px 18px;color:#fff;font-weight:bold;font-size:13px;">🤖 DeepSeek 자산 전망</div>'
+                  f'<div style="padding:16px 18px;color:#444;font-size:13px;line-height:1.9;">{outlook}</div></div>'
+              )
+          )
+
+          html = f"""<!DOCTYPE html>
+          <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+          <body style="margin:0;padding:0;background:#f6f7fb;font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;">
+            <div style="max-width:600px;margin:0 auto;padding:20px;">
+
+              <div style="background:#1a1a2e;border-radius:16px;padding:26px 22px;color:#fff;text-align:center;margin-bottom:18px;">
+                <div style="font-size:30px;margin-bottom:6px;">💰</div>
+                <div style="font-size:20px;font-weight:bold;letter-spacing:-0.3px;">나의 자산 브리핑</div>
+                <div style="font-size:12px;opacity:0.7;margin-top:8px;">{today} ({weekday}) · 오전 8시</div>
+              </div>
+
+              {body}
+
+              <div style="text-align:center;color:#b0b6c0;font-size:11px;margin-top:18px;line-height:1.7;">
+                Yahoo Finance · CoinGecko · DeepSeek<br>
+                자동 발송 · 투자 참고용
+              </div>
+            </div>
+          </body></html>"""
+
+          # ===== 4. 이메일 전송 =====
+          msg = MIMEMultipart()
+          msg["From"] = os.environ["GMAIL_ADDRESS"]
+          msg["To"] = os.environ["EMAIL_TO"]
+          msg["Subject"] = "💰 나의 자산 브리핑"
+          msg.attach(MIMEText(html, "html"))
+
+          with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+              server.starttls()
+              server.login(os.environ["GMAIL_ADDRESS"], os.environ["GMAIL_APP_PASSWORD"])
+              server.send_message(msg)
+
+          print("✅ 자산 브리핑 전송 완료!")
+          PYEOF
+          python /tmp/market_brief.py
