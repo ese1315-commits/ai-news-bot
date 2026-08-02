@@ -1,0 +1,229 @@
+name: Daily Hot Deal Digest
+
+on:
+  schedule:
+    - cron: "0 21 * * *"   # 한국 오전 6시 (UTC 21시)
+  workflow_dispatch:
+
+jobs:
+  hotdeal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Generate and send hotdeal digest
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          cat <<'PYEOF' > /tmp/hotdeal.py
+          import os, re, json, smtplib, urllib.request
+          from html import unescape
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+          from datetime import datetime
+
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+              "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+              "Referer": "https://www.ppomppu.co.kr/",
+          }
+
+          def fetch(url):
+              try:
+                  req = urllib.request.Request(url, headers=HEADERS)
+                  with urllib.request.urlopen(req, timeout=20) as resp:
+                      return resp.read().decode("utf-8", "ignore")
+              except Exception as e:
+                  print(f"❌ {url} 실패: {e}")
+                  return ""
+
+          # ========== 1. 뽐뿌 ==========
+          def get_ppomppu():
+              items = []
+              for pid in ["ppomppu", "ppomppu8"]:
+                  html = fetch(f"https://www.ppomppu.co.kr/zboard/zboard.php?id={pid}")
+                  if not html:
+                      continue
+                  links = re.findall(r'href="(/zboard/view\.php\?id=\w+&no=\d+[^"]*)"[^>]*>([^<]{5,80})</a>', html)
+                  seen = set()
+                  for link, title in links:
+                      title = unescape(title.strip())
+                      if title and title not in seen and "공지" not in title and "로그인" not in title:
+                          seen.add(title)
+                          items.append(f"- {title}: https://www.ppomppu.co.kr{link}")
+                      if len(items) >= 15:
+                          break
+              print(f"✅ 뽐뿌: {len(items)}건")
+              return items
+
+          # ========== 2. 어미새 ==========
+          def get_eomisae():
+              items = []
+              html = fetch("https://eomisae.co.kr")
+              if not html:
+                  return items
+              links = re.findall(r'href="(/[^"]*(?:deal|article|post|board)[^"]*)"[^>]*>([^<]{5,60})</a>', html)
+              seen = set()
+              for link, title in links:
+                  title = unescape(title.strip())
+                  if title and title not in seen and "회원" not in title and "로그인" not in title:
+                      seen.add(title)
+                      items.append(f"- {title}: https://eomisae.co.kr{link}")
+                  if len(items) >= 15:
+                      break
+              print(f"✅ 어미새: {len(items)}건")
+              return items
+
+          # ========== 3. 알구몬 ==========
+          def get_algumon():
+              items = []
+              html = fetch("https://www.algumon.com/n/deal")
+              if not html:
+                  return items
+              # 알구몬은 JS 렌더링이라 직접 추출 어려움 - 그래도 시도
+              links = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>([^<]{8,60})</a>', html)
+              seen = set()
+              for link, title in links:
+                  title = unescape(title.strip())
+                  if title and title not in seen and "로그인" not in title and "회원" not in title:
+                      seen.add(title)
+                      items.append(f"- {title}: https://www.algumon.com{link if link.startswith('/') else '/'+link}")
+                  if len(items) >= 10:
+                      break
+              print(f"✅ 알구몬: {len(items)}건")
+              return items
+
+          # ========== 수집 ==========
+          print("📡 핫딜 수집 중...")
+          all_items = []
+          all_items += get_ppomppu()
+          all_items += get_eomisae()
+          all_items += get_algumon()
+
+          if not all_items:
+              all_items = ["오늘 수집된 핫딜이 없습니다. (사이트 접속 실패 가능성)"]
+
+          news_text = "\n".join(all_items[:40])
+
+          # ========== DeepSeek 요약 ==========
+          print("🤖 DeepSeek 요약 중...")
+          def call_deepseek(prompt):
+              data = json.dumps({
+                  "model": "deepseek-chat",
+                  "messages": [{"role": "user", "content": prompt}]
+              }).encode()
+              req = urllib.request.Request(
+                  "https://api.deepseek.com/chat/completions",
+                  data=data,
+                  headers={
+                      "Content-Type": "application/json",
+                      "Authorization": f"Bearer {os.environ['DEEPSEEK_API_KEY']}"
+                  }
+              )
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  result = json.loads(resp.read().decode())
+              return result["choices"][0]["message"]["content"]
+
+          prompt = f"""아래는 뽐뿌/어미새/알구몬에서 수집한 핫딜 목록이다.
+          정말 유용한 핫딜만 골라서, 카테고리별로 정리해줘.
+
+          반드시 아래 JSON 형식으로만 출력해. 설명 없이 순수 JSON만.
+
+          {{
+            "전자기기": [{{"title": "제목", "link": "https://...", "price": "가격"}}],
+            "의류/패션": [{{"title": "제목", "link": "https://...", "price": "가격"}}],
+            "식품/생활": [{{"title": "제목", "link": "https://...", "price": "가격"}}],
+            "기타": [{{"title": "제목", "link": "https://...", "price": "가격"}}]
+          }}
+
+          각 카테고리 최대 5개씩. 가격은 제목에서 추출하되 없으면 "확인 필요".
+
+          핫딜 목록:
+          {news_text}"""
+
+          try:
+              raw = call_deepseek(prompt)
+              s1 = raw.find("{")
+              s2 = raw.rfind("}") + 1
+              data = json.loads(raw[s1:s2])
+          except Exception as e:
+              data = {"오류": [{"title": f"요약 실패: {e}", "link": "#", "price": "-"}]}
+
+          # ========== HTML 생성 ==========
+          print("📧 이메일 생성 중...")
+          today = datetime.now().strftime("%Y.%m.%d")
+          weekday = ["월", "화", "수", "목", "금", "토", "일"][datetime.now().weekday()]
+
+          CATS = {
+              "전자기기": "#7C3AED",
+              "의류/패션": "#EC4899",
+              "식품/생활": "#0EA5E9",
+              "기타": "#059669",
+              "오류": "#DC2626",
+          }
+
+          sections = ""
+          for cat, items in data.items():
+              if not isinstance(items, list) or not items:
+                  continue
+              color = CATS.get(cat, "#333")
+              emoji = {"전자기기": "📱", "의류/패션": "👕", "식품/생활": "🍎", "기타": "🛍️", "오류": "⚠️"}.get(cat, "🛒")
+              rows = ""
+              for i, item in enumerate(items[:5], 1):
+                  title = item.get("title", "제목 없음")
+                  link = item.get("link", "#")
+                  price = item.get("price", "-")
+                  rows += (
+                      f'<a href="{link}" style="display:flex;align-items:flex-start;text-decoration:none;'
+                      f'padding:12px 18px;border-bottom:1px solid #f0f0f0;">'
+                      f'<span style="flex-shrink:0;width:24px;height:24px;border-radius:50%;background:{color};'
+                      f'color:#fff;font-size:12px;font-weight:bold;display:flex;align-items:center;'
+                      f'justify-content:center;margin-right:10px;margin-top:2px;">{i}</span>'
+                      f'<span style="flex:1;"><span style="color:#1a1a2e;font-size:13px;line-height:1.5;display:block;">{title}</span>'
+                      f'<span style="color:{color};font-size:12px;font-weight:bold;">{price}</span></span></a>'
+                  )
+              sections += (
+                  f'<div style="background:#fff;border-radius:12px;margin-bottom:12px;overflow:hidden;'
+                  f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
+                  f'<div style="background:{color};padding:11px 18px;color:#fff;font-weight:bold;font-size:13px;">'
+                  f'{emoji} {cat} <span style="font-size:11px;font-weight:normal;opacity:0.8;">({len(items)}건)</span></div>'
+                  f'<div style="padding:4px 0;">{rows}</div></div>'
+              )
+
+          html = f"""<!DOCTYPE html>
+          <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+          <body style="margin:0;padding:0;background:#f6f7fb;font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;">
+            <div style="max-width:600px;margin:0 auto;padding:20px;">
+
+              <div style="background:linear-gradient(135deg,#f5576c,#f093fb);border-radius:16px;padding:26px 22px;color:#fff;text-align:center;margin-bottom:18px;">
+                <div style="font-size:30px;margin-bottom:6px;">🔥</div>
+                <div style="font-size:20px;font-weight:bold;">오늘의 핫딜</div>
+                <div style="font-size:12px;opacity:0.8;margin-top:8px;">{today} ({weekday}) · 뽐뿌 · 어미새 · 알구몬</div>
+              </div>
+
+              {sections}
+
+              <div style="text-align:center;color:#b0b6c0;font-size:11px;margin-top:18px;line-height:1.7;">
+                뽐뿌 · 어미새 · 알구몬에서 수집 · DeepSeek 분류<br>
+                자동 발송 · 할인 정보는 직접 확인 후 구매하세요
+              </div>
+            </div>
+          </body></html>"""
+
+          # ========== 전송 ==========
+          msg = MIMEMultipart()
+          msg["From"] = os.environ["GMAIL_ADDRESS"]
+          msg["To"] = os.environ["EMAIL_TO"]
+          msg["Subject"] = "🔥 오늘의 핫딜 모음"
+          msg.attach(MIMEText(html, "html"))
+
+          with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+              server.starttls()
+              server.login(os.environ["GMAIL_ADDRESS"], os.environ["GMAIL_APP_PASSWORD"])
+              server.send_message(msg)
+
+          print("✅ 핫딜 이메일 전송 완료!")
+          PYEOF
+          python /tmp/hotdeal.py
