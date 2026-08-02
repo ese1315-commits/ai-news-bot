@@ -8,7 +8,7 @@ on:
 jobs:
   market-briefing:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Generate and send market briefing
         env:
@@ -25,22 +25,76 @@ jobs:
 
           HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-          def yahoo_price(symbol):
+          # ============ 데이터 수집 ============
+          def yahoo_chart(symbol, range_str="3mo"):
               try:
-                  url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?range=5d&interval=1d"
+                  url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?range={range_str}&interval=1d"
                   req = urllib.request.Request(url, headers=HEADERS)
                   with urllib.request.urlopen(req, timeout=15) as resp:
                       data = json.loads(resp.read().decode())
                   result = data["chart"]["result"][0]
                   closes = result["indicators"]["quote"][0]["close"]
+                  volumes = result["indicators"]["quote"][0]["volume"]
                   closes = [c for c in closes if c is not None]
-                  if len(closes) < 2:
-                      return None
-                  last, prev = closes[-1], closes[-2]
-                  return last, (last - prev) / prev * 100
+                  volumes = [v if v is not None else 0 for v in volumes]
+                  return closes, volumes
               except Exception as e:
-                  print(f"Yahoo {symbol} 실패: {e}")
+                  print(f"chart {symbol} 실패: {e}")
+                  return [], []
+
+          def calc_rsi(closes, period=14):
+              if len(closes) < period + 1:
                   return None
+              gains, losses = [], []
+              for i in range(1, len(closes)):
+                  d = closes[i] - closes[i-1]
+                  gains.append(max(d, 0))
+                  losses.append(max(-d, 0))
+              ag = sum(gains[-period:]) / period
+              al = sum(losses[-period:]) / period
+              if al == 0:
+                  return 100.0
+              rs = ag / al
+              return 100 - (100 / (1 + rs))
+
+          def calc_ma(closes, p):
+              if len(closes) < p:
+                  return None
+              return sum(closes[-p:]) / p
+
+          def analyze(symbol):
+              closes, volumes = yahoo_chart(symbol)
+              if len(closes) < 2:
+                  return None
+              last, prev = closes[-1], closes[-2]
+              pct = (last - prev) / prev * 100
+              vol_ratio = None
+              if len(volumes) >= 5:
+                  avg5 = sum(volumes[-5:]) / 5
+                  avg20 = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else avg5
+                  if avg20 > 0:
+                      vol_ratio = avg5 / avg20
+              trend1m = (last - closes[-22]) / closes[-22] * 100 if len(closes) >= 22 else None
+              trend3m = (last - closes[-66]) / closes[-66] * 100 if len(closes) >= 66 else None
+              return {
+                  "price": last, "pct": pct, "vol_ratio": vol_ratio,
+                  "rsi": calc_rsi(closes),
+                  "ma5": calc_ma(closes, 5), "ma20": calc_ma(closes, 20), "ma60": calc_ma(closes, 60),
+                  "t1m": trend1m, "t3m": trend3m
+              }
+
+          def dividend_yield(symbol):
+              try:
+                  url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&fields=dividendYield"
+                  req = urllib.request.Request(url, headers=HEADERS)
+                  with urllib.request.urlopen(req, timeout=10) as resp:
+                      data = json.loads(resp.read().decode())
+                  rows = data["quoteResponse"]["result"]
+                  if rows and rows[0].get("dividendYield"):
+                      return rows[0]["dividendYield"] * 100
+              except Exception as e:
+                  print(f"배당 {symbol} 실패: {e}")
+              return None
 
           def coin_prices():
               try:
@@ -49,8 +103,99 @@ jobs:
                   with urllib.request.urlopen(req, timeout=15) as resp:
                       return json.loads(resp.read().decode())
               except Exception as e:
-                  print(f"CoinGecko 실패: {e}")
+                  print(f"코인 실패: {e}")
                   return {}
+
+          # ============ 표시 도우미 ============
+          def trend(pct):
+              if pct is None:
+                  return '<span style="color:#9CA3AF;">-</span>'
+              arrow = "▲" if pct >= 0 else "▼"
+              color = "#E94560" if pct >= 0 else "#2563EB"
+              return f'<span style="color:{color};font-weight:bold;">{arrow}{abs(pct):.2f}%</span>'
+
+          def ma_state(a):
+              if not a or a["ma5"] is None or a["ma20"] is None or a["ma60"] is None:
+                  return '<span style="color:#aaa;">-</span>'
+              if a["ma5"] >= a["ma20"] >= a["ma60"]:
+                  return '<span style="color:#E94560;">정배열↑</span>'
+              if a["ma5"] < a["ma20"] < a["ma60"]:
+                  return '<span style="color:#2563EB;">역배열↓</span>'
+              return '<span style="color:#F59E0B;">혼조</span>'
+
+          def rsi_label(rsi):
+              if rsi is None:
+                  return '<span style="color:#aaa;">-</span>'
+              if rsi >= 70:
+                  return f'<span style="color:#DC2626;">과매수 {rsi:.0f}</span>'
+              if rsi <= 30:
+                  return f'<span style="color:#10B981;">과매도 {rsi:.0f}</span>'
+              return f'<span style="color:#F59E0B;">{rsi:.0f}</span>'
+
+          def vol_label(vr):
+              if vr is None:
+                  return '<span style="color:#aaa;">-</span>'
+              if vr >= 1.5:
+                  return f'<span style="color:#DC2626;">폭증 {vr:.1f}x</span>'
+              if vr >= 1.2:
+                  return f'<span style="color:#F59E0B;">증가 {vr:.1f}x</span>'
+              return f'<span style="color:#9CA3AF;">{vr:.1f}x</span>'
+
+          def trend_label(t, suffix="M"):
+              if t is None:
+                  return '<span style="color:#aaa;">-</span>'
+              c = "#E94560" if t >= 0 else "#2563EB"
+              return f'<span style="color:{c};">{suffix}{abs(t):.1f}%</span>'
+
+          def asset_row(name, a, curr="", decimals=2, extra_label=""):
+              if a:
+                  val = f"{curr}{a['price']:,.{decimals}f}"
+                  chg = trend(a["pct"])
+                  sub = (
+                      f'<div style="font-size:11px;color:#888;margin-top:4px;">'
+                      f'RSI {rsi_label(a["rsi"])} · MA {ma_state(a)} · 거래 {vol_label(a["vol_ratio"])} · '
+                      f'{trend_label(a["t1m"],"1M")} {trend_label(a["t3m"],"3M")}'
+                      f'</div>'
+                  )
+              else:
+                  val, chg, sub = "-", '<span style="color:#aaa;">-</span>', ""
+              return (
+                  f'<div style="padding:11px 18px;border-bottom:1px solid #f6f6f6;">'
+                  f'<div style="display:flex;justify-content:space-between;align-items:center;">'
+                  f'<span style="font-size:13px;color:#555;">{name}{extra_label}</span>'
+                  f'<span style="font-size:13px;color:#1a1a2e;font-weight:bold;">{val} {chg}</span></div>'
+                  f'{sub}</div>'
+              )
+
+          def card(title, rows_html, subtitle=""):
+              st = f' <span style="font-size:11px;color:#aaa;font-weight:normal;">{subtitle}</span>' if subtitle else ""
+              return (
+                  f'<div style="background:#fff;border-radius:12px;margin-bottom:12px;overflow:hidden;'
+                  f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
+                  f'<div style="padding:12px 18px;border-bottom:1px solid #f0f0f0;">'
+                  f'<span style="font-size:13px;font-weight:bold;color:#1a1a2e;">{title}</span>{st}</div>'
+                  f'<div style="padding:4px 0;">{rows_html}</div></div>'
+              )
+
+          def half_card(title, name, a, curr="", decimals=2):
+              if a:
+                  val = f"{curr}{a['price']:,.{decimals}f} {trend(a['pct'])}"
+                  sub = (
+                      f'<div style="font-size:10px;color:#888;margin-top:4px;">'
+                      f'RSI {rsi_label(a["rsi"])} · MA {ma_state(a)} · {trend_label(a["t3m"],"3M")}</div>'
+                  )
+              else:
+                  val, sub = "-", ""
+              return (
+                  f'<div style="flex:1;background:#fff;border-radius:12px;overflow:hidden;'
+                  f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
+                  f'<div style="padding:12px 14px;border-bottom:1px solid #f0f0f0;">'
+                  f'<span style="font-size:12px;font-weight:bold;color:#1a1a2e;">{title}</span></div>'
+                  f'<div style="padding:12px 14px;">'
+                  f'<div style="font-size:12px;color:#555;">{name}</div>'
+                  f'<div style="font-size:14px;color:#1a1a2e;font-weight:bold;margin-top:4px;">{val}</div>{sub}'
+                  f'</div></div>'
+              )
 
           def call_deepseek(prompt):
               data = json.dumps({
@@ -65,146 +210,204 @@ jobs:
                       "Authorization": f"Bearer {os.environ['DEEPSEEK_API_KEY']}"
                   }
               )
-              with urllib.request.urlopen(req, timeout=60) as resp:
+              with urllib.request.urlopen(req, timeout=90) as resp:
                   result = json.loads(resp.read().decode())
               return result["choices"][0]["message"]["content"]
 
-          def trend(pct):
-              if pct is None:
-                  return '<span style="color:#9CA3AF;">-</span>'
-              arrow = "▲" if pct >= 0 else "▼"
-              color = "#E94560" if pct >= 0 else "#2563EB"
-              return f'<span style="color:{color};font-weight:bold;">{arrow}{abs(pct):.2f}%</span>'
-
-          def make_rows(entries, decimals=2, currency="$"):
-              html = ""
-              for name, data, curr in entries:
-                  if data:
-                      price, pct = data
-                      value = f"{curr}{price:,.{decimals}f}"
-                  else:
-                      pct, value = None, "-"
-                  change = trend(pct)
-                  html += (
-                      f'<div style="display:flex;justify-content:space-between;align-items:center;'
-                      f'padding:12px 18px;border-bottom:1px solid #f6f6f6;">'
-                      f'<span style="font-size:13px;color:#555;">{name}</span>'
-                      f'<span style="font-size:13px;color:#1a1a2e;font-weight:bold;">{value} {change}</span></div>'
-                  )
-              return html
-
-          def card(title, rows_html):
-              return (
-                  f'<div style="background:#fff;border-radius:12px;margin-bottom:12px;overflow:hidden;'
-                  f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
-                  f'<div style="padding:12px 18px;border-bottom:1px solid #f0f0f0;">'
-                  f'<span style="font-size:13px;font-weight:bold;color:#1a1a2e;">{title}</span></div>'
-                  f'<div style="padding:4px 0;">{rows_html}</div></div>'
-              )
-
-          def half_card(title, name, value_line):
-              return (
-                  f'<div style="flex:1;background:#fff;border-radius:12px;overflow:hidden;'
-                  f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
-                  f'<div style="padding:12px 14px;border-bottom:1px solid #f0f0f0;">'
-                  f'<span style="font-size:12px;font-weight:bold;color:#1a1a2e;">{title}</span></div>'
-                  f'<div style="padding:12px 14px;">'
-                  f'<div style="font-size:12px;color:#555;">{name}</div>'
-                  f'<div style="font-size:14px;color:#1a1a2e;font-weight:bold;margin-top:4px;">{value_line}</div>'
-                  f'</div></div>'
-              )
-
-          # ===== 1. 데이터 수집 =====
-          print("📡 시세 수집 중...")
-          us_idx = [
-              ("다우지수", yahoo_price("^DJI"), ""),
-              ("나스닥", yahoo_price("^IXIC"), ""),
-              ("S&P 500", yahoo_price("^GSPC"), ""),
-          ]
-          stocks = [
-              ("테슬라 (TSLA)", yahoo_price("TSLA"), "$"),
-              ("엔비디아 (NVDA)", yahoo_price("NVDA"), "$"),
-              ("애플 (AAPL)", yahoo_price("AAPL"), "$"),
-          ]
-          us_etf = [
-              ("SCHD <span style='color:#aaa;font-size:11px;'>배당</span>", yahoo_price("SCHD"), "$"),
-              ("SCHG <span style='color:#aaa;font-size:11px;'>성장</span>", yahoo_price("SCHG"), "$"),
-          ]
-          kr = [
-              ("코스피", yahoo_price("^KS11"), ""),
-              ("삼성전자", yahoo_price("005930.KS"), ""),
-              ("SK하이닉스", yahoo_price("000660.KS"), ""),
-          ]
-          fx = [
-              ("원/달러 환율", yahoo_price("KRW=X"), ""),
-              ("국제 금 <span style='color:#aaa;font-size:11px;'>온스</span>", yahoo_price("GC=F"), "$"),
-              ("WTI 유가 <span style='color:#aaa;font-size:11px;'>배럴</span>", yahoo_price("CL=F"), "$"),
-          ]
+          # ============ 1. 데이터 수집 ============
+          print("📡 데이터 수집 중...")
+          assets = {
+              "다우지수": analyze("^DJI"),
+              "나스닥": analyze("^IXIC"),
+              "S&P 500": analyze("^GSPC"),
+              "테슬라": analyze("TSLA"),
+              "엔비디아": analyze("NVDA"),
+              "애플": analyze("AAPL"),
+              "SCHD": analyze("SCHD"),
+              "SCHG": analyze("SCHG"),
+              "코스피": analyze("^KS11"),
+              "삼성전자": analyze("005930.KS"),
+              "SK하이닉스": analyze("000660.KS"),
+              "TOPIX17": analyze("1629.T"),
+              "KODEX골드": analyze("132030.KS"),
+              "원달러": analyze("KRW=X"),
+              "국제금": analyze("GC=F"),
+              "WTI": analyze("CL=F"),
+              "은": analyze("SI=F"),
+              "구리": analyze("HG=F"),
+              "VIX": analyze("^VIX"),
+              "미10년": analyze("^TNX"),
+              "DXY": analyze("DX-Y.NYB"),
+          }
           coins = coin_prices()
+          dy = {"SCHD": dividend_yield("SCHD"), "SCHG": dividend_yield("SCHG")}
 
-          jp = yahoo_price("1629.T")
-          gold = yahoo_price("132030.KS")
-
-          # ===== 2. DeepSeek 전망 =====
-          print("🤖 DeepSeek 전망 생성 중...")
-          lines = []
-          for name, data, _ in us_idx + stocks + us_etf + kr + fx:
-              if data:
-                  lines.append(f"{name}: {data[0]:,.2f} ({data[1]:+.2f}%)")
-          if jp:
-              lines.append(f"노무라 TOPIX17: {jp[0]:,.2f} ({jp[1]:+.2f}%)")
-          if gold:
-              lines.append(f"KODEX 골드선물: {gold[0]:,.2f} ({gold[1]:+.2f}%)")
+          # ============ 2. DeepSeek 매수/매도 점수 ============
+          print("🤖 매수/매도 점수 생성 중...")
+          score_lines = []
+          for name, a in assets.items():
+              if a:
+                  score_lines.append(
+                      f"{name}: 가격 {a['price']:.2f} ({a['pct']:+.2f}%), RSI {a['rsi'] if a['rsi'] else 'N/A'}, "
+                      f"MA5 {a['ma5'] if a['ma5'] else 'N/A'}, MA20 {a['ma20'] if a['ma20'] else 'N/A'}, MA60 {a['ma60'] if a['ma60'] else 'N/A'}, "
+                      f"거래량비 {a['vol_ratio'] if a['vol_ratio'] else 'N/A'}, 1M {a['t1m'] if a['t1m'] else 'N/A'}%, 3M {a['t3m'] if a['t3m'] else 'N/A'}%"
+                  )
           for cid, cname in [("bitcoin", "비트코인"), ("ethereum", "이더리움")]:
               if cid in coins:
-                  lines.append(f"{cname}: ${coins[cid]['usd']:,.2f} ({coins[cid].get('usd_24h_change', 0):+.2f}%)")
+                  score_lines.append(f"{cname}: ${coins[cid]['usd']:.2f} ({coins[cid].get('usd_24h_change',0):+.2f}%)")
 
-          prompt = f"""오늘의 시장 데이터 (한국 아침 8시 기준):
-          {'\n'.join(lines)}
+          score_prompt = f"""아래는 각 자산의 현재 시세와 기술적 지표다.
+          각 자산에 대해 매수/보유/관망/매도 판단과 점수(0~100)를 매겨줘.
+          점수 기준: RSI(70↑과매수 감점, 30↓과매도 가산), 이동평균 정배열 가산/역배열 감점,
+          거래량 증가 가산, 1M/3M 추세 상승 가산.
 
-          위 시세를 바탕으로 3~5줄로 시장 전망을 한국어로 요약해줘.
-          개인 투자자가 알아두면 좋을 인사이트 중심으로, 각 문단을 <br>로 구분해서 써줘."""
+          반드시 아래 JSON 형식으로만 출력해. 설명 없이 순수 JSON만.
+
+          {{
+            "판단": [
+              {{"자산": "SCHD", "점수": 82, "판단": "매수", "이유": "..."}},
+              {{"자산": "SCHG", "점수": 68, "판단": "보유", "이유": "..."}}
+            ],
+            "한줄요약": "오늘 시장 한 줄 요약"
+          }}
+
+          데이터:
+          {'\n'.join(score_lines)}"""
 
           try:
-              outlook = call_deepseek(prompt).replace("\n", "<br>")
+              score_raw = call_deepseek(score_prompt)
+              s1 = score_raw.find("{")
+              s2 = score_raw.rfind("}") + 1
+              score_data = json.loads(score_raw[s1:s2])
+          except Exception as e:
+              score_data = {"판단": [], "한줄요약": f"점수 생성 실패: {e}"}
+
+          # ============ 3. DeepSeek 전망 ============
+          print("🤖 시장 전망 생성 중...")
+          outlook_prompt = f"""오늘의 시장 데이터 (한국 아침 8시):
+          {'\n'.join(score_lines[:30])}
+
+          위 데이터를 바탕으로 3~5줄로 시장 전망을 한국어로 요약해줘.
+          개인 투자자가 알아두면 좋을 인사이트 중심으로, 각 문단을 <br>로 구분."""
+
+          try:
+              outlook = call_deepseek(outlook_prompt).replace("\n", "<br>")
           except Exception as e:
               outlook = f"전망 생성 실패: {e}"
 
-          # ===== 3. HTML 생성 =====
+          # ============ 4. HTML 생성 ============
           print("📧 이메일 생성 중...")
           today = datetime.now().strftime("%Y.%m.%d")
           weekday = ["월", "화", "수", "목", "금", "토", "일"][datetime.now().weekday()]
 
-          def fmt_coin(cid, cname):
+          def dy_label(sym):
+              if dy.get(sym):
+                  return f' <span style="color:#10B981;font-size:11px;">배당 {dy[sym]:.1f}%</span>'
+              return ""
+
+          # VIX 카드
+          vix = assets.get("VIX")
+          if vix and vix["price"]:
+              if vix["price"] >= 30:
+                  vix_state = '<span style="color:#DC2626;font-weight:bold;">🔴 공포</span>'
+              elif vix["price"] >= 20:
+                  vix_state = '<span style="color:#F59E0B;font-weight:bold;">🟡 중립</span>'
+              else:
+                  vix_state = '<span style="color:#10B981;font-weight:bold;">🟢 안정</span>'
+              vix_html = (
+                  f'<div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;">'
+                  f'<span style="font-size:13px;color:#555;">VIX (공포지수)</span>'
+                  f'<span style="font-size:15px;font-weight:bold;color:#1a1a2e;">{vix["price"]:.1f} {vix_state}</span></div>'
+              )
+          else:
+              vix_html = '<div style="padding:14px 18px;color:#999;">VIX 데이터 없음</div>'
+
+          # 금리+DXY 카드
+          t10 = assets.get("미10년")
+          dxy = assets.get("DXY")
+          rates_rows = ""
+          if t10:
+              rates_rows += (
+                  f'<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid #f6f6f6;">'
+                  f'<span style="font-size:13px;color:#555;">미국 10년물</span>'
+                  f'<span style="font-size:13px;color:#1a1a2e;font-weight:bold;">{t10["price"]:.2f}% {trend(t10["pct"])}</span></div>'
+              )
+          if dxy:
+              rates_rows += (
+                  f'<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;">'
+                  f'<span style="font-size:13px;color:#555;">달러 인덱스 (DXY)</span>'
+                  f'<span style="font-size:13px;color:#1a1a2e;font-weight:bold;">{dxy["price"]:.2f} {trend(dxy["pct"])}</span></div>'
+              )
+
+          # 코인
+          def coin_row(cid, cname):
               if cid in coins:
-                  price = coins[cid]['usd']
-                  chg = coins[cid].get('usd_24h_change', 0)
+                  p = coins[cid]['usd']
+                  c = coins[cid].get('usd_24h_change', 0)
                   return (
-                      f'<div style="display:flex;justify-content:space-between;align-items:center;'
-                      f'padding:12px 18px;border-bottom:1px solid #f6f6f6;">'
+                      f'<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid #f6f6f6;">'
                       f'<span style="font-size:13px;color:#555;">{cname} <span style="color:#aaa;font-size:11px;">{cid.upper()}</span></span>'
-                      f'<span style="font-size:13px;color:#1a1a2e;font-weight:bold;">${price:,.2f} {trend(chg)}</span></div>'
+                      f'<span style="font-size:13px;color:#1a1a2e;font-weight:bold;">${p:,.2f} {trend(c)}</span></div>'
                   )
-              return f'<div style="padding:12px 18px;color:#999;">{cname} 데이터 없음</div>'
+              return f'<div style="padding:12px 18px;color:#999;">{cname} 없음</div>'
+          coin_html = coin_row("bitcoin", "비트코인") + coin_row("ethereum", "이더리움")
 
-          coin_rows = fmt_coin("bitcoin", "비트코인") + fmt_coin("ethereum", "이더리움")
+          # 매수/매도 점수 카드
+          score_rows = ""
+          score_meta = {"매수": "#10B981", "보유": "#F59E0B", "관망": "#9CA3AF", "매도": "#DC2626"}
+          for item in score_data.get("판단", [])[:12]:
+              asset_name = item.get("자산", "?")
+              sc = item.get("점수", 0)
+              verdict = item.get("판단", "?")
+              reason = item.get("이유", "")[:40]
+              emoji = {"매수": "🟢", "보유": "🔵", "관망": "🟡", "매도": "🔴"}.get(verdict, "⚪")
+              color = score_meta.get(verdict, "#9CA3AF")
+              score_rows += (
+                  f'<div style="display:flex;justify-content:space-between;align-items:center;padding:11px 18px;border-bottom:1px solid #f6f6f6;">'
+                  f'<span style="font-size:13px;color:#555;">{emoji} {asset_name}</span>'
+                  f'<span style="font-size:13px;"><span style="color:{color};font-weight:bold;">{verdict} {sc}점</span>'
+                  f'<span style="color:#aaa;font-size:11px;margin-left:8px;">{reason}</span></span></div>'
+              )
+          summary_line = score_data.get("한줄요약", "")
+          score_card = (
+              f'<div style="background:#fff;border-radius:12px;margin-bottom:12px;overflow:hidden;'
+              f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
+              f'<div style="background:#1a1a2e;padding:12px 18px;color:#fff;font-weight:bold;font-size:13px;">🤖 DeepSeek 매수/매도 스코어</div>'
+              f'{score_rows if score_rows else "<div style=padding:14px 18px;color:#999;>판단 생성 실패</div>"}'
+              f'<div style="padding:12px 18px;background:#fafafa;font-size:12px;color:#555;line-height:1.6;">💡 {summary_line}</div></div>'
+          )
 
-          def val_line(data, curr, decimals=2):
-              if data:
-                  return f'{curr}{data[0]:,.{decimals}f} {trend(data[1])}'
-              return f'- {trend(None)}'
-
+          # 본문 조립
           body = (
-              card("🌏 미국 지수 <span style='font-size:11px;color:#aaa;font-weight:normal;'>어제 마감</span>", make_rows(us_idx, decimals=0, currency=""))
-              + card("🚀 주요 종목", make_rows(stocks))
-              + card("🇺🇸 미국 ETF", make_rows(us_etf))
-              + card("🇰🇷 한국 시장 <span style='font-size:11px;color:#aaa;font-weight:normal;'>개장 전</span>", make_rows(kr, decimals=0, currency=""))
+              card("🌏 미국 지수", "어제 마감",
+                   asset_row("다우지수", assets["다우지수"], decimals=0)
+                   + asset_row("나스닥", assets["나스닥"], decimals=0)
+                   + asset_row("S&P 500", assets["S&P 500"], decimals=0))
+              + card("🚀 주요 종목", "",
+                   asset_row("테슬라", assets["테슬라"], "$")
+                   + asset_row("엔비디아", assets["엔비디아"], "$")
+                   + asset_row("애플", assets["애플"], "$"))
+              + card("🇺🇸 미국 ETF", "",
+                   asset_row("SCHD", assets["SCHD"], "$", extra_label=dy_label("SCHD"))
+                   + asset_row("SCHG", assets["SCHG"], "$", extra_label=dy_label("SCHG")))
+              + card("🇰🇷 한국 시장", "개장 전",
+                   asset_row("코스피", assets["코스피"], decimals=0)
+                   + asset_row("삼성전자", assets["삼성전자"], "", 0)
+                   + asset_row("SK하이닉스", assets["SK하이닉스"], "", 0))
               + '<div style="display:flex;gap:12px;margin-bottom:12px;">'
-              + half_card("🇯🇵 일본", "TOPIX17", val_line(jp, "¥"))
-              + half_card("🥇 한국 금", "KODEX 골드", val_line(gold, "", 0))
+              + half_card("🇯🇵 일본", "TOPIX17", assets["TOPIX17"], "¥")
+              + half_card("🥇 한국 금", "KODEX 골드", assets["KODEX골드"], "", 0)
               + '</div>'
-              + card("🪙 코인 <span style='font-size:11px;color:#aaa;font-weight:normal;'>24시간</span>", coin_rows)
-              + card("💱 환율 · 원자재", make_rows(fx))
+              + card("🪙 코인", "24시간", coin_html)
+              + card("😨 공포/탐욕 지수", "", vix_html)
+              + card("💵 금리 · 달러", "", rates_rows)
+              + card("💱 환율 · 원자재", "",
+                   asset_row("원/달러", assets["원달러"], "", 0)
+                   + asset_row("국제 금", assets["국제금"], "$", 0)
+                   + asset_row("WTI 유가", assets["WTI"], "$")
+                   + asset_row("은", assets["은"], "$")
+                   + asset_row("구리", assets["구리"], "$"))
+              + score_card
               + (
                   f'<div style="background:#fff;border-radius:12px;margin-bottom:12px;overflow:hidden;'
                   f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
@@ -233,7 +436,7 @@ jobs:
             </div>
           </body></html>"""
 
-          # ===== 4. 이메일 전송 =====
+          # ============ 5. 전송 ============
           msg = MIMEMultipart()
           msg["From"] = os.environ["GMAIL_ADDRESS"]
           msg["To"] = os.environ["EMAIL_TO"]
