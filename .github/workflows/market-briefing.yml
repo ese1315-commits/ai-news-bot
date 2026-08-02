@@ -25,7 +25,6 @@ jobs:
 
           HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-          # ===== 시세 가져오기 (Yahoo Finance) =====
           def yahoo_price(symbol):
               try:
                   url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?range=5d&interval=1d"
@@ -43,7 +42,6 @@ jobs:
                   print(f"Yahoo {symbol} 실패: {e}")
                   return None
 
-          # ===== 코인 가져오기 (CoinGecko) =====
           def coin_prices():
               try:
                   url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true"
@@ -54,7 +52,6 @@ jobs:
                   print(f"CoinGecko 실패: {e}")
                   return {}
 
-          # ===== DeepSeek 호출 =====
           def call_deepseek(prompt):
               data = json.dumps({
                   "model": "deepseek-chat",
@@ -72,7 +69,6 @@ jobs:
                   result = json.loads(resp.read().decode())
               return result["choices"][0]["message"]["content"]
 
-          # ===== 표시 도우미 =====
           def trend(pct):
               if pct is None:
                   return '<span style="color:#9CA3AF;">-</span>'
@@ -120,13 +116,29 @@ jobs:
 
           # ===== 1. 데이터 수집 =====
           print("📡 시세 수집 중...")
-          us = [
+          us_idx = [
+              ("다우지수", yahoo_price("^DJI"), ""),
+              ("나스닥", yahoo_price("^IXIC"), ""),
+              ("S&P 500", yahoo_price("^GSPC"), ""),
+          ]
+          stocks = [
+              ("테슬라 (TSLA)", yahoo_price("TSLA"), "$"),
+              ("엔비디아 (NVDA)", yahoo_price("NVDA"), "$"),
+              ("애플 (AAPL)", yahoo_price("AAPL"), "$"),
+          ]
+          us_etf = [
               ("SCHD <span style='color:#aaa;font-size:11px;'>배당</span>", yahoo_price("SCHD"), "$"),
               ("SCHG <span style='color:#aaa;font-size:11px;'>성장</span>", yahoo_price("SCHG"), "$"),
+          ]
+          kr = [
+              ("코스피", yahoo_price("^KS11"), ""),
+              ("삼성전자", yahoo_price("005930.KS"), ""),
+              ("SK하이닉스", yahoo_price("000660.KS"), ""),
           ]
           fx = [
               ("원/달러 환율", yahoo_price("KRW=X"), ""),
               ("국제 금 <span style='color:#aaa;font-size:11px;'>온스</span>", yahoo_price("GC=F"), "$"),
+              ("WTI 유가 <span style='color:#aaa;font-size:11px;'>배럴</span>", yahoo_price("CL=F"), "$"),
           ]
           coins = coin_prices()
 
@@ -136,7 +148,7 @@ jobs:
           # ===== 2. DeepSeek 전망 =====
           print("🤖 DeepSeek 전망 생성 중...")
           lines = []
-          for name, data, _ in us + fx:
+          for name, data, _ in us_idx + stocks + us_etf + kr + fx:
               if data:
                   lines.append(f"{name}: {data[0]:,.2f} ({data[1]:+.2f}%)")
           if jp:
@@ -147,7 +159,7 @@ jobs:
               if cid in coins:
                   lines.append(f"{cname}: ${coins[cid]['usd']:,.2f} ({coins[cid].get('usd_24h_change', 0):+.2f}%)")
 
-          prompt = f"""오늘의 자산 시세 (한국 아침 8시 기준):
+          prompt = f"""오늘의 시장 데이터 (한국 아침 8시 기준):
           {'\n'.join(lines)}
 
           위 시세를 바탕으로 3~5줄로 시장 전망을 한국어로 요약해줘.
@@ -183,17 +195,20 @@ jobs:
               return f'- {trend(None)}'
 
           body = (
-              card("🇺🇸 미국 ETF", make_rows(us))
+              card("🌏 미국 지수 <span style='font-size:11px;color:#aaa;font-weight:normal;'>어제 마감</span>", make_rows(us_idx, decimals=0, currency=""))
+              + card("🚀 주요 종목", make_rows(stocks))
+              + card("🇺🇸 미국 ETF", make_rows(us_etf))
+              + card("🇰🇷 한국 시장 <span style='font-size:11px;color:#aaa;font-weight:normal;'>개장 전</span>", make_rows(kr, decimals=0, currency=""))
               + '<div style="display:flex;gap:12px;margin-bottom:12px;">'
               + half_card("🇯🇵 일본", "TOPIX17", val_line(jp, "¥"))
               + half_card("🥇 한국 금", "KODEX 골드", val_line(gold, "", 0))
               + '</div>'
-              + card("🪙 코인", coin_rows)
-              + card("💱 환율 · 국제 금", make_rows(fx))
+              + card("🪙 코인 <span style='font-size:11px;color:#aaa;font-weight:normal;'>24시간</span>", coin_rows)
+              + card("💱 환율 · 원자재", make_rows(fx))
               + (
                   f'<div style="background:#fff;border-radius:12px;margin-bottom:12px;overflow:hidden;'
                   f'box-shadow:0 1px 4px rgba(0,0,0,0.06);">'
-                  f'<div style="background:#7C3AED;padding:12px 18px;color:#fff;font-weight:bold;font-size:13px;">🤖 DeepSeek 자산 전망</div>'
+                  f'<div style="background:#7C3AED;padding:12px 18px;color:#fff;font-weight:bold;font-size:13px;">🤖 DeepSeek 시장 전망</div>'
                   f'<div style="padding:16px 18px;color:#444;font-size:13px;line-height:1.9;">{outlook}</div></div>'
               )
           )
@@ -205,7 +220,7 @@ jobs:
 
               <div style="background:#1a1a2e;border-radius:16px;padding:26px 22px;color:#fff;text-align:center;margin-bottom:18px;">
                 <div style="font-size:30px;margin-bottom:6px;">💰</div>
-                <div style="font-size:20px;font-weight:bold;letter-spacing:-0.3px;">나의 자산 브리핑</div>
+                <div style="font-size:20px;font-weight:bold;letter-spacing:-0.3px;">오늘의 시장 브리핑</div>
                 <div style="font-size:12px;opacity:0.7;margin-top:8px;">{today} ({weekday}) · 오전 8시</div>
               </div>
 
@@ -222,7 +237,7 @@ jobs:
           msg = MIMEMultipart()
           msg["From"] = os.environ["GMAIL_ADDRESS"]
           msg["To"] = os.environ["EMAIL_TO"]
-          msg["Subject"] = "💰 나의 자산 브리핑"
+          msg["Subject"] = "💰 오늘의 시장 브리핑"
           msg.attach(MIMEText(html, "html"))
 
           with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
@@ -230,6 +245,6 @@ jobs:
               server.login(os.environ["GMAIL_ADDRESS"], os.environ["GMAIL_APP_PASSWORD"])
               server.send_message(msg)
 
-          print("✅ 자산 브리핑 전송 완료!")
+          print("✅ 시장 브리핑 전송 완료!")
           PYEOF
           python /tmp/market_brief.py
