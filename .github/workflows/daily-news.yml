@@ -81,4 +81,10 @@ jobs:
           PYEOF
 
       - name: Run digest
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          AI_RESPONSE_LANGUAGE: ${{ secrets.AI_RESPONSE_LANGUAGE }}
         run: python /tmp/news_digest.py
