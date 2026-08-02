@@ -9,96 +9,247 @@ jobs:
   news-digest:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install feedparser
-
-      - name: Create Python script
+      # ===== 1. 프로젝트 파일들 생성 =====
+      - name: Create project files
         run: |
-          cat <<'PYEOF' > /tmp/news_digest.py
-          import os, smtplib, json, urllib.request, feedparser
+          mkdir -p .github/workflows image
+
+          # ---- config.yaml (설정 파일) ----
+          cat <<'CFG' > config.yaml
+          llm:
+            provider: deepseek
+            model: deepseek-chat
+
+          news:
+            use_real_sources: true
+            enable_web_search: false
+            max_items_per_source: 10
+            topics:
+              - "AI/테크"
+              - "정치/사회"
+              - "경제"
+            sources:
+              - "https://www.yna.co.kr/rss/topnews.xml"
+              - "https://www.hani.co.kr/rss/"
+              - "https://news.kbs.co.kr/rss/rss5g.xml"
+              - "https://www.chosun.com/rss/"
+              - "https://www.joongang.co.kr/rss/"
+              - "https://www.khan.co.kr/rss/"
+              - "https://www.mt.co.kr/rss/"
+              - "https://www.fnnews.com/rss/"
+              - "https://www.etnews.com/rss/"
+              - "https://zdnet.co.kr/rss/"
+              - "https://it.donga.com/feed/"
+              - "https://www.bloter.net/rss/"
+              - "https://imnews.imbc.com/rss/"
+              - "https://www.ytn.co.kr/rss/"
+            prompt_template: |
+              아래 한국 뉴스 중 진짜 중요하고 파급력이 큰 것만 엄선해줘.
+              AI/테크 5개, 정치/사회 3개, 경제 3개만 뽑아줘.
+              가십, 연예, 단순 스포츠 결과는 제외.
+
+          logging:
+            level: INFO
+            format: "%(asctime)s - %(levelname)s - %(message)s"
+          CFG
+
+          # ---- requirements.txt ----
+          cat <<'REQ' > requirements.txt
+          feedparser==6.0.11
+          PyYAML==6.0.2
+          beautifulsoup4==4.12.3
+          requests==2.32.3
+          REQ
+
+          # ---- news_crawler.py (뉴스 수집 모듈) ----
+          cat <<'PY' > news_crawler.py
+          import re, urllib.request, feedparser
+
+          HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+          def fetch(url):
+              req = urllib.request.Request(url, headers=HEADERS)
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  return resp.read().decode("utf-8", "ignore")
+
+          def get_rss(url, limit=10):
+              try:
+                  feed = feedparser.parse(url)
+                  return [f"- {e.get('title','')}: {e.get('link','')}" for e in feed.entries[:limit]]
+              except Exception as e:
+                  print(f"RSS 실패: {url} - {e}")
+                  return []
+
+          def get_naver_popular():
+              """네이버 많이 본 뉴스 (조회수 기반)"""
+              try:
+                  html = fetch("https://news.naver.com/main/ranking/popularDay.naver")
+                  titles = re.findall(r'class="list_title[^"]*"[^>]*>([^<]+)</a>', html)
+                  links = re.findall(r'href="(https://n\.news\.naver\.com/mnews/article/[^"]+)"', html)
+                  seen, out = set(), []
+                  for t, l in zip(titles, links):
+                      t = t.strip()
+                      if t and t not in seen and "https" in l:
+                          seen.add(t)
+                          out.append(f"- {t}: {l}")
+                      if len(out) >= 10:
+                          break
+                  return out
+              except Exception as e:
+                  print(f"네이버 랭킹 실패: {e}")
+                  return []
+
+          def get_daum_commented():
+              """다음 댓글 많은 뉴스 (댓글 수 기반)"""
+              try:
+                  html = fetch("https://news.daum.net/ranking/popular/")
+                  titles = re.findall(r'<a href="([^"]*)" class="link_txt"[^>]*>([^<]+)</a>', html)
+                  comments = re.findall(r'class="link_comm"[^>]*>.*?(\d+)', html)
+                  out = []
+                  for i, (link, title) in enumerate(titles[:10]):
+                      c = comments[i] if i < len(comments) else "?"
+                      out.append(f"- [{c}개 댓글] {title.strip()}: {link}")
+                  return out
+              except Exception as e:
+                  print(f"다음 랭킹 실패: {e}")
+                  return []
+
+          def collect_news(config):
+              sources = config["news"].get("sources", [])
+              rss_items = []
+              for url in sources:
+                  rss_items += get_rss(url, 5)
+
+              return (
+                  "--- [네이버 많이 본 뉴스] ---\n" + "\n".join(get_naver_popular())
+                  + "\n\n--- [다음 댓글 많은 뉴스] ---\n" + "\n".join(get_daum_commented())
+                  + "\n\n--- [구글 뉴스 한국] ---\n" + "\n".join(get_rss("https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko", 15))
+                  + "\n\n--- [국내 언론사] ---\n" + "\n".join(rss_items)
+              )
+          PY
+
+          # ---- content_processor.py (딥시크 엄선 모듈) ----
+          cat <<'PY' > content_processor.py
+          import json, os, urllib.request
+
+          def call_deepseek(prompt):
+              data = json.dumps({
+                  "model": "deepseek-chat",
+                  "messages": [{"role": "user", "content": prompt}]
+              }).encode()
+              req = urllib.request.Request(
+                  "https://api.deepseek.com/chat/completions",
+                  data=data,
+                  headers={
+                      "Content-Type": "application/json",
+                      "Authorization": f"Bearer {os.environ['DEEPSEEK_API_KEY']}"
+                  }
+              )
+              with urllib.request.urlopen(req) as resp:
+                  result = json.loads(resp.read().decode())
+              return result["choices"][0]["message"]["content"]
+
+          def process_news(news_text, config):
+              prompt_template = config["news"].get("prompt_template", "")
+              prompt = f"""{prompt_template}
+
+              출력 형식:
+              ## 🔹 AI/테크 (핵심 5건)
+              1. 제목 - 링크
+              ## 🔹 정치/사회 (핵심 3건)
+              1. 제목 - 링크
+              ## 🔹 경제 (핵심 3건)
+              1. 제목 - 링크
+
+              뉴스 목록:
+              {news_text}"""
+              return call_deepseek(prompt)
+          PY
+
+          # ---- report_generator.py (HTML 이메일 생성) ----
+          cat <<'PY' > report_generator.py
+          from datetime import datetime
+
+          def generate_html(summary_html):
+              today = datetime.now().strftime("%Y년 %m월 %d일")
+              return f"""<!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8"><style>
+            body {{ font-family: 'Malgun Gothic', sans-serif; background:#f4f4f4; padding:20px; }}
+            .container {{ max-width:600px; margin:0 auto; background:#fff; border-radius:12px; padding:24px; }}
+            h1 {{ color:#1a1a2e; border-bottom:3px solid #e94560; padding-bottom:10px; }}
+            h2 {{ color:#16213e; margin-top:28px; }}
+            a {{ color:#e94560; text-decoration:none; }}
+            li {{ line-height:1.7; color:#333; margin:8px 0; }}
+            .footer {{ margin-top:30px; padding-top:15px; border-top:1px solid #ddd; color:#888; font-size:12px; }}
+          </style></head>
+          <body><div class="container">
+            <h1>📰 오늘의 중요 뉴스</h1>
+            <p style="color:#888;">{today} · DeepSeek가 엄선한 핵심 뉴스</p>
+            {summary_html}
+            <div class="footer">매일 자동 발송 · ai-news-bot</div>
+          </div></body></html>"""
+          PY
+
+          # ---- notification_sender.py (이메일 전송) ----
+          cat <<'PY' > notification_sender.py
+          import os, smtplib
           from email.mime.text import MIMEText
           from email.mime.multipart import MIMEMultipart
 
-          SOURCES = [
-              # ── 종합 뉴스 ──
-              "https://www.yna.co.kr/rss/topnews.xml",
-              "https://www.hani.co.kr/rss/",
-              "https://news.kbs.co.kr/rss/rss5g.xml",
-              "https://www.chosun.com/rss/",
-              "https://www.joongang.co.kr/rss/",
-              "https://www.khan.co.kr/rss/",
-              # ── 경제 뉴스 ──
-              "https://www.mt.co.kr/rss/",
-              "https://www.fnnews.com/rss/",
-              "https://www.etnews.com/rss/",
-              # ── IT/테크 뉴스 ──
-              "https://zdnet.co.kr/rss/",
-              "https://it.donga.com/feed/",
-              "https://www.bloter.net/rss/",
-              # ── 방송 뉴스 ──
-              "https://imnews.imbc.com/rss/",
-              "https://www.ytn.co.kr/rss/",
-          ]
-          items = []
-          for url in SOURCES:
-              try:
-                  feed = feedparser.parse(url)
-                  for entry in feed.entries[:3]:
-                      items.append(f"- {entry.get('title','')}: {entry.get('link','')}")
-              except Exception as e:
-                  print(f"RSS 실패: {url} - {e}")
+          def send_email(subject, html_body):
+              msg = MIMEMultipart()
+              msg["From"] = os.environ["GMAIL_ADDRESS"]
+              msg["To"] = os.environ["EMAIL_TO"]
+              msg["Subject"] = subject
+              msg.attach(MIMEText(html_body, "html"))
 
-          news_text = "\n".join(items[:20]) if items else "뉴스를 가져오지 못했습니다."
+              with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                  server.starttls()
+                  server.login(os.environ["GMAIL_ADDRESS"], os.environ["GMAIL_APP_PASSWORD"])
+                  server.send_message(msg)
+          PY
 
-          lang = os.environ.get("AI_RESPONSE_LANGUAGE", "ko")
-          prompt = f"""다음 한국 뉴스들을 {lang}로 요약해서 HTML 형식으로 만들어줘.
-          핵심 10가지를 짧고 명확하게 정리하고, 각 항목에 제목과 링크를 남겨줘.
-          뉴스:
-          {news_text}"""
+          # ---- main.py (메인 실행 파일) ----
+          cat <<'PY' > main.py
+          import os, yaml
+          import news_crawler, content_processor, report_generator, notification_sender
 
-          data = json.dumps({
-              "model": "deepseek-chat",
-              "messages": [{"role": "user", "content": prompt}]
-          }).encode()
+          def main():
+              with open("config.yaml", "r", encoding="utf-8") as f:
+                  config = yaml.safe_load(f)
 
-          req = urllib.request.Request(
-              "https://api.deepseek.com/chat/completions",
-              data=data,
-              headers={
-                  "Content-Type": "application/json",
-                  "Authorization": f"Bearer {os.environ['DEEPSEEK_API_KEY']}"
-              }
-          )
-          try:
-              with urllib.request.urlopen(req) as resp:
-                  result = json.loads(resp.read().decode())
-              summary_html = result["choices"][0]["message"]["content"]
-          except Exception as e:
-              summary_html = f"<p>요약 실패: {e}</p><pre>{news_text}</pre>"
+              print("📡 뉴스 수집 중...")
+              news_text = news_crawler.collect_news(config)
 
-          msg = MIMEMultipart()
-          msg["From"] = os.environ["GMAIL_ADDRESS"]
-          msg["To"] = os.environ["EMAIL_TO"]
-          msg["Subject"] = "📰 오늘의 국내 뉴스 요약"
-          msg.attach(MIMEText(summary_html, "html"))
+              print("🤖 DeepSeek로 중요 뉴스 엄선 중...")
+              summary = content_processor.process_news(news_text, config)
 
-          with smtplib.SMTP("smtp.gmail.com", 587) as server:
-              server.starttls()
-              server.login(os.environ["GMAIL_ADDRESS"], os.environ["GMAIL_APP_PASSWORD"])
-              server.send_message(msg)
+              print("📧 이메일 생성 및 전송 중...")
+              html = report_generator.generate_html(summary)
+              notification_sender.send_email("📰 오늘의 중요 뉴스 (엄선본)", html)
 
-          print("✅ 이메일 전송 완료!")
-          PYEOF
+              print("✅ 이메일 전송 완료!")
 
-      - name: Run digest
+          if __name__ == "__main__":
+              main()
+          PY
+
+      # ===== 2. 의존성 설치 =====
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ===== 3. 실행 =====
+      - name: Run news digest
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          AI_RESPONSE_LANGUAGE: ${{ secrets.AI_RESPONSE_LANGUAGE }}
-        run: python /tmp/news_digest.py
+        run: python main.py
