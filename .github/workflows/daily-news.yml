@@ -31,16 +31,22 @@ jobs:
               - "AI/테크"
               - "정치/사회"
               - "경제"
+              - "국제"
+              - "스포츠"
+              - "연예"
+              - "생활/문화"
+              - "과학/건강"
             sources:
               - "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko"
               - "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko&topic=p"
               - "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko&topic=b"
-              - "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko&topic=tc"
+              - "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko&topic=t"
+              - "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko&topic=w"
+              - "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko&topic=s"
+              - "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko&topic=e"
             prompt_template: |
               아래는 구글 뉴스 한국이 선별한 인기 뉴스 목록이다.
-              여기서 가장 화제성 있고 중요한 뉴스만 엄선해줘.
-              AI/테크 5개, 정치/사회 3개, 경제 3개만 뽑아줘.
-              가십, 연예, 단순 스포츠 결과는 제외.
+              모든 분야에서 가장 중요한 뉴스를 골라줘.
           CFG
 
           # ---- requirements.txt ----
@@ -77,56 +83,16 @@ jobs:
                   print(f"RSS 실패: {url} - {e}")
                   return []
 
-          def get_naver_popular():
-              try:
-                  html = fetch("https://news.naver.com/main/ranking/popularDay.naver")
-                  if not html:
-                      return []
-                  titles = re.findall(r'class="list_title[^"]*"[^>]*>([^<]+)</a>', html)
-                  links = re.findall(r'href="(https://n\.news\.naver\.com/mnews/article/[^"]+)"', html)
-                  seen, out = set(), []
-                  for t, l in zip(titles, links):
-                      t = t.strip()
-                      if t and t not in seen and "https" in l:
-                          seen.add(t)
-                          out.append(f"- {t}: {l}")
-                      if len(out) >= 10:
-                          break
-                  return out
-              except Exception as e:
-                  print(f"네이버 랭킹 실패: {e}")
-                  return []
-
-          def get_daum_commented():
-              try:
-                  html = fetch("https://news.daum.net/ranking/popular/")
-                  if not html:
-                      return []
-                  titles = re.findall(r'<a href="([^"]*)" class="link_txt"[^>]*>([^<]+)</a>', html)
-                  comments = re.findall(r'class="link_comm"[^>]*>.*?(\d+)', html)
-                  out = []
-                  for i, (link, title) in enumerate(titles[:10]):
-                      c = comments[i] if i < len(comments) else "?"
-                      out.append(f"- [{c}개 댓글] {title.strip()}: {link}")
-                  return out
-              except Exception as e:
-                  print(f"다음 랭킹 실패: {e}")
-                  return []
-
           def collect_news(config):
               sources = config["news"].get("sources", [])
               rss_items = []
               for url in sources:
                   rss_items += get_rss(url, 10)
 
-              return (
-                  "--- [구글 뉴스 한국 인기] ---\n" + "\n".join(rss_items)
-                  + "\n\n--- [네이버 많이 본 뉴스] ---\n" + "\n".join(get_naver_popular())
-                  + "\n\n--- [다음 댓글 많은 뉴스] ---\n" + "\n".join(get_daum_commented())
-              )
+              return "--- [구글 뉴스 한국 인기] ---\n" + "\n".join(rss_items)
           PY
 
-          # ---- content_processor.py (JSON 출력 버전) ----
+          # ---- content_processor.py ----
           cat <<'PY' > content_processor.py
           import json, os, urllib.request
 
@@ -151,12 +117,21 @@ jobs:
               prompt_template = config["news"].get("prompt_template", "")
               prompt = f"""{prompt_template}
 
+          아래 8개 섹션으로 나눠서, 각 섹션당 가장 중요한 뉴스를 5개씩 엄선해줘.
+          AI/테크는 별도 섹션으로 반드시 분리해줘 (일반 IT/과학과 구분).
+          가십, 광고성 기사, 지엽적인 뉴스는 제외.
+
           반드시 아래 JSON 형식으로만 출력해. 설명, 마크다운, 코드 블록은 절대 넣지 마.
 
           {{
             "AI/테크": [{{"title": "제목", "link": "https://..."}}],
             "정치/사회": [{{"title": "제목", "link": "https://..."}}],
-            "경제": [{{"title": "제목", "link": "https://..."}}]
+            "경제": [{{"title": "제목", "link": "https://..."}}],
+            "국제": [{{"title": "제목", "link": "https://..."}}],
+            "스포츠": [{{"title": "제목", "link": "https://..."}}],
+            "연예": [{{"title": "제목", "link": "https://..."}}],
+            "생활/문화": [{{"title": "제목", "link": "https://..."}}],
+            "과학/건강": [{{"title": "제목", "link": "https://..."}}]
           }}
 
           뉴스 목록:
@@ -168,17 +143,22 @@ jobs:
                   return json.loads(raw[start:end])
               except Exception as e:
                   print(f"JSON 파싱 실패: {e}")
-                  return {"AI/테크": [], "정치/사회": [], "경제": [], "원문": raw}
+                  return {"원문": raw}
           PY
 
-          # ---- report_generator.py (깔끔한 디자인 버전) ----
+          # ---- report_generator.py ----
           cat <<'PY' > report_generator.py
           from datetime import datetime
 
-          CATEGORY_COLORS = {
-              "AI/테크": "#7C3AED",
-              "정치/사회": "#E94560",
-              "경제": "#0EA5E9",
+          CATEGORY_STYLE = {
+              "AI/테크":     {"color": "#7C3AED", "emoji": "🤖"},
+              "정치/사회":   {"color": "#E94560", "emoji": "🏛️"},
+              "경제":        {"color": "#0EA5E9", "emoji": "📈"},
+              "국제":        {"color": "#059669", "emoji": "🌍"},
+              "스포츠":      {"color": "#F59E0B", "emoji": "⚽"},
+              "연예":        {"color": "#EC4899", "emoji": "🎬"},
+              "생활/문화":   {"color": "#8B5CF6", "emoji": "🎨"},
+              "과학/건강":   {"color": "#14B8A6", "emoji": "🔬"},
           }
 
           def generate_html(data):
@@ -189,8 +169,8 @@ jobs:
               for cat, items in data.items():
                   if not isinstance(items, list) or not items:
                       continue
-                  color = CATEGORY_COLORS.get(cat, "#333")
-                  emoji = {"AI/테크": "🤖", "정치/사회": "🏛️", "경제": "📈"}.get(cat, "📰")
+                  style = CATEGORY_STYLE.get(cat, {"color": "#333", "emoji": "📰"})
+                  color, emoji = style["color"], style["emoji"]
                   count = len(items)
 
                   rows = ""
@@ -274,7 +254,7 @@ jobs:
 
               print("📧 이메일 생성 및 전송 중...")
               html = report_generator.generate_html(summary)
-              notification_sender.send_email("📰 오늘의 핵심 뉴스", html)
+              notification_sender.send_email("📰 오늘의 핵심 뉴스 (전분야)", html)
 
               print("✅ 이메일 전송 완료!")
 
